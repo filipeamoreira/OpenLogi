@@ -382,17 +382,14 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
 async fn request_input_monitoring() {
-    // Without this, macOS never registers a decision at all:
+    // Without this, macOS never registers a request at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
-    // discovered. Wait for the blocking consent dialog before starting the
-    // inventory so it cannot cache the pre-grant access state.
+    // discovered. Relaunch after an immediate grant because the running
+    // process keeps its old TCC decision.
     if !openlogi_hid::permissions::has_access() {
-        let access_after_prompt = tokio::task::spawn_blocking(|| {
-            openlogi_hid::permissions::request_access();
-            openlogi_hid::permissions::has_access()
-        })
-        .await;
+        let access_after_prompt =
+            tokio::task::spawn_blocking(openlogi_hid::permissions::request_access).await;
         match access_after_prompt {
             Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
             Ok(false) => {}
