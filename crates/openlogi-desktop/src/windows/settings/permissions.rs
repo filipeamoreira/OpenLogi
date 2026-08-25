@@ -253,6 +253,11 @@ fn permission_field(
                         return;
                     }
                     permissions::open_pane(permission);
+                    // Stage the helper outside OpenLogi.app so the privacy
+                    // picker grants the identity that owns HID access.
+                    if matches!(permission, Permission::InputMonitoring) {
+                        crate::services::ipc::reveal_agent_bundle();
+                    }
                 }),
         )
 }

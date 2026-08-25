@@ -63,8 +63,8 @@ fn open_error(error: async_hid::HidError) -> BackendError {
                  permission session (log out and back in)"
             } else {
                 "Input Monitoring is NOT granted to this process; grant it to \
-                 OpenLogi Agent under System Settings → Privacy & Security → \
-                 Input Monitoring"
+                 OpenLogi Agent (not OpenLogi) under System Settings → Privacy \
+                 & Security → Input Monitoring"
             };
             BackendError::Backend(format!("{message}: {hint}"))
         }

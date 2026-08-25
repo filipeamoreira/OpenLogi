@@ -5,16 +5,17 @@
 //! permission — without it, every `IOHIDDeviceOpen` is silently denied and no
 //! HID++ device ever appears, with no error surfaced beyond a debug log.
 //!
-//! Checking never prompts; [`request_access`] is the prompting call, and it
-//! must run in this process (the agent), not the GUI — a TCC grant is scoped
-//! to the code-signing identity that asks for it, and the agent (not the GUI)
-//! is the one that actually opens HID devices.
+//! Checking never registers the app in System Settings; [`request_access`]
+//! records the request, and it must run in this process (the agent), not the
+//! GUI; a TCC grant is scoped to the code-signing identity that asks for it,
+//! and the agent (not the GUI) is the one that actually opens HID devices.
 
 use std::cfg_select;
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestAccess, IOHIDRequestType};
+    use objc2_core_graphics::CGRequestListenEventAccess;
+    use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestType};
 
     pub(super) fn has_access() -> bool {
         matches!(
@@ -23,12 +24,11 @@ mod macos {
         )
     }
 
-    pub(super) fn request_access() {
-        // Unlike `AXIsProcessTrustedWithOptions`, `IOHIDRequestAccess` blocks
-        // the calling thread until the user answers the consent dialog (or
-        // returns immediately if the status is already determined) — callers
-        // must run this off the async runtime.
-        let _granted = IOHIDRequestAccess(IOHIDRequestType::ListenEvent);
+    pub(super) fn request_access() -> bool {
+        // `IOHIDRequestAccess` no longer prompts for ListenEvent on macOS 26.
+        // Core Graphics exposes the supported user-consent request for the
+        // same Input Monitoring TCC service.
+        CGRequestListenEventAccess()
     }
 }
 
@@ -43,15 +43,16 @@ pub fn has_access() -> bool {
     }
 }
 
-/// Raise the macOS Input Monitoring consent dialog if not yet determined, so
-/// this process (and not whichever process last called it) is the one listed
-/// under System Settings → Privacy & Security → Input Monitoring.
+/// Register this process with macOS as requesting Input Monitoring access.
 ///
-/// Blocks the calling thread until the user responds — run it off the async
-/// runtime (e.g. `tokio::task::spawn_blocking`). No-op off macOS.
-pub fn request_access() {
+/// macOS may require the user to add the app manually under System Settings →
+/// Privacy & Security → Input Monitoring. Run this off the async runtime in
+/// case the OS blocks while handling the request. Returns whether access was
+/// granted. Always returns `true` off macOS.
+#[must_use]
+pub fn request_access() -> bool {
     cfg_select! {
-        target_os = "macos" => { macos::request_access(); }
-        _ => {}
+        target_os = "macos" => { macos::request_access() }
+        _ => { true }
     }
 }

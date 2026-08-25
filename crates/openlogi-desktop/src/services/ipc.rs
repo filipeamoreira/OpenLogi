@@ -21,6 +21,8 @@
 //! is noticed when its hold window passes without an answer.
 
 use std::future::Future;
+#[cfg(target_os = "macos")]
+use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -365,6 +367,113 @@ fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
     (bundle.extension()? == "app").then_some(bundle)
 }
 
+/// Stage and reveal the agent that owns macOS Input Monitoring access.
+#[cfg(target_os = "macos")]
+pub(crate) fn reveal_agent_bundle() {
+    let Some(binary) = agent_binary_path() else {
+        warn!("could not locate the agent helper to reveal in Finder");
+        return;
+    };
+    let Some(embedded) = helper_bundle(&binary) else {
+        warn!(path = %binary.display(), "agent is not inside an app bundle");
+        return;
+    };
+    // The privacy picker attributes a nested helper to its enclosing app.
+    // An identical signed copy outside OpenLogi.app keeps the agent's TCC
+    // identity while making it independently selectable.
+    let home = match openlogi_core::paths::home_dir() {
+        Ok(home) => home,
+        Err(e) => {
+            warn!(error = %e, "could not resolve the standalone agent location");
+            return;
+        }
+    };
+    let Some(bundle) = permission_agent_bundle_path(&home, embedded) else {
+        warn!(path = %embedded.display(), "agent bundle has no file name");
+        return;
+    };
+    if let Err(e) = stage_permission_agent(embedded, &bundle) {
+        warn!(error = %e, source = %embedded.display(), destination = %bundle.display(), "could not stage the standalone agent helper");
+        return;
+    }
+    match std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg("--")
+        .arg(&bundle)
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            warn!(%status, path = %bundle.display(), "could not reveal the agent helper in Finder");
+        }
+        Err(e) => {
+            warn!(error = %e, path = %bundle.display(), "could not reveal the agent helper in Finder");
+        }
+        Ok(_) => {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn permission_agent_bundle_path(
+    home: &std::path::Path,
+    embedded: &std::path::Path,
+) -> Option<PathBuf> {
+    Some(home.join("Applications").join(embedded.file_name()?))
+}
+
+#[cfg(target_os = "macos")]
+fn stage_permission_agent(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> io::Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("standalone agent path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::other("standalone agent path has no file name"))?;
+    let staging = parent.join(format!(
+        ".{}.staging-{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    remove_staged_path(&staging)?;
+
+    let copied = std::process::Command::new("/usr/bin/ditto")
+        .arg(source)
+        .arg(&staging)
+        .status()?;
+    if !copied.success() {
+        remove_staged_path(&staging)?;
+        return Err(io::Error::other(format!("ditto exited with {copied}")));
+    }
+    let verified = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict"])
+        .arg(&staging)
+        .status()?;
+    if !verified.success() {
+        remove_staged_path(&staging)?;
+        return Err(io::Error::other(format!(
+            "codesign verification exited with {verified}"
+        )));
+    }
+
+    remove_staged_path(destination)?;
+    std::fs::rename(staging, destination)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_staged_path(path: &std::path::Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path)
+        }
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
 /// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
@@ -699,6 +808,17 @@ mod tests {
         assert_eq!(
             helper_bundle(Path::new("target/debug/openlogi-agent")),
             None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn permission_agent_is_staged_outside_the_enclosing_app() {
+        let embedded =
+            Path::new("/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app");
+        assert_eq!(
+            permission_agent_bundle_path(Path::new("/Users/me"), embedded),
+            Some(PathBuf::from("/Users/me/Applications/OpenLogi Agent.app"))
         );
     }
 }
